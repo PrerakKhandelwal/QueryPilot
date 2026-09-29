@@ -1,0 +1,92 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:latest}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$OLLAMA_MODEL\""]
+    restart: "no"
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: development
+      DEMO_MODE: "true"
+      DB_URI: sqlite:////app/data/demo.db
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - demo_data:/app/data
+    command:
+      - sh
+      - -c
+      - >-
+        python scripts/init_demo_db.py &&
+        streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  api:
+    build: .
+    profiles: ["api"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: development
+      DEMO_MODE: "true"
+      DB_URI: sqlite:////app/data/demo.db
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+    depends_on:
+      app:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - demo_data:/app/data
+    command:
+      - uvicorn
+      - sql_agent.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+
+volumes:
+  ollama_models:
+  demo_data:
